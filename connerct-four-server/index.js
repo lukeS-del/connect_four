@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
+const db = require("./db");
 
 const app = express();
 const server = http.createServer(app);
@@ -13,7 +14,8 @@ const ROWS = 6;
 const COLS = 7;
 const ROOM_TTL_MS = 1000 * 60 * 60 * 6; // комнаты старше 6 часов без активности удаляются
 
-// В памяти сервера: code -> room state
+// В памяти сервера: code -> room state (быстрый доступ на каждый ход)
+// БД — это резервная копия на случай перезапуска/сна сервера, не источник истины на лету.
 const rooms = new Map();
 // socket.id -> { code, role }
 const socketMeta = new Map();
@@ -59,9 +61,12 @@ function genCode() {
   return s;
 }
 
+// Рассылает состояние всем в комнате и асинхронно сохраняет его в БД (не блокируя игру)
 function broadcast(code) {
   const room = rooms.get(code);
-  if (room) io.to(code).emit("state", room);
+  if (!room) return;
+  io.to(code).emit("state", room);
+  db.saveRoom(room);
 }
 
 io.on("connection", (socket) => {
@@ -93,6 +98,7 @@ io.on("connection", (socket) => {
     socketMeta.set(socket.id, { code, role: 1 });
     socket.join(code);
     socket.emit("created", { code, role: 1, state: room });
+    db.saveRoom(room);
   });
 
   socket.on("joinRoom", ({ name, code } = {}) => {
@@ -140,8 +146,10 @@ io.on("connection", (socket) => {
       room.winner = meta.role;
       room.winCells = winInfo.cells;
       room.score[meta.role] = (room.score[meta.role] || 0) + 1;
+      db.logFinishedGame(room);
     } else if (countMoves(board) === ROWS * COLS) {
       room.status = "draw";
+      db.logFinishedGame(room);
     } else {
       room.turn = meta.role === 1 ? 2 : 1;
     }
@@ -192,15 +200,48 @@ io.on("connection", (socket) => {
   });
 });
 
-// Периодическая уборка старых пустых комнат, чтобы не копить память
+// ---------- REST API: лидерборд и история партий (данные из БД) ----------
+app.get("/api/leaderboard", async (req, res) => {
+  try {
+    const rows = await db.getLeaderboard(20);
+    res.json({ enabled: db.hasDb, rows });
+  } catch (e) {
+    res.status(500).json({ enabled: db.hasDb, rows: [], error: e.message });
+  }
+});
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const rows = await db.getHistory(20);
+    res.json({ enabled: db.hasDb, rows });
+  } catch (e) {
+    res.status(500).json({ enabled: db.hasDb, rows: [], error: e.message });
+  }
+});
+
+// Периодическая уборка старых пустых комнат — и из памяти, и из БД
 setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms.entries()) {
-    if (now - room.lastActivity > ROOM_TTL_MS) rooms.delete(code);
+    if (now - room.lastActivity > ROOM_TTL_MS) {
+      rooms.delete(code);
+      db.deleteRoom(code);
+    }
   }
 }, 1000 * 60 * 30);
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log("Connect Four server running on port " + PORT);
-});
+
+async function start() {
+  await db.migrate();
+  // Восстанавливаем недавно активные комнаты из БД в память после перезапуска сервера
+  const restored = await db.loadRecentRooms(ROOM_TTL_MS);
+  for (const room of restored) rooms.set(room.code, room);
+  if (restored.length) console.log(`Восстановлено комнат из БД: ${restored.length}`);
+
+  server.listen(PORT, () => {
+    console.log("Connect Four server running on port " + PORT);
+  });
+}
+
+start();

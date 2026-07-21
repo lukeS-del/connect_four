@@ -66,6 +66,7 @@
       <p class="c4-hint" style="max-width:420px;text-align:center;margin-top:16px;">
         Создай игру и отправь код другу — он вводит его на этой же странице у себя.
       </p>
+      <button class="c4-back" id="statsBtn" style="margin-top:10px;">🏆 Таблица лидеров и история партий</button>
     `;
     document.getElementById("createBtn").onclick = () => {
       const name = document.getElementById("nameInput").value.trim() || "Игрок 1";
@@ -79,6 +80,74 @@
       socket.emit("joinRoom", { name, code });
     };
     document.getElementById("codeInput").addEventListener("input", (e) => { e.target.value = e.target.value.toUpperCase(); });
+    document.getElementById("statsBtn").onclick = renderStats;
+  }
+
+  // ---------------- STATS (лидерборд + история) ----------------
+  async function renderStats() {
+    view = "stats";
+    root.innerHTML = `
+      <div class="c4-eyebrow">СТАТИСТИКА</div>
+      <div class="c4-title" style="font-size:24px;">Топ <span>игроков</span></div>
+      <div class="c4-panel" style="max-width:480px;">
+        <div id="statsBody" style="text-align:center;color:var(--text-dim);font-size:13px;">Загрузка...</div>
+      </div>
+      <button class="c4-back" id="statsBack">← Назад</button>
+    `;
+    document.getElementById("statsBack").onclick = renderHome;
+
+    try {
+      const [lbRes, histRes] = await Promise.all([
+        fetch("/api/leaderboard").then((r) => r.json()),
+        fetch("/api/history").then((r) => r.json()),
+      ]);
+      const body = document.getElementById("statsBody");
+      if (!lbRes.enabled) {
+        body.innerHTML = `<div class="c4-error" style="margin-top:0;">База данных не подключена на сервере — статистика недоступна.</div>`;
+        return;
+      }
+      let html = "";
+      if (lbRes.rows.length === 0) {
+        html += `<div style="color:var(--text-dim);font-size:13px;margin-bottom:18px;">Пока никто не сыграл ни одной партии.</div>`;
+      } else {
+        html += `<div style="text-align:left;margin-bottom:22px;">`;
+        lbRes.rows.forEach((row, i) => {
+          html += `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2c2822;font-size:13px;">
+              <span style="color:var(--text-dim);font-family:'Courier New',monospace;width:24px;">${i + 1}.</span>
+              <span style="flex:1;">${escapeHtml(row.name)}</span>
+              <span style="font-family:'Courier New',monospace;color:var(--p1);">${row.wins} побед</span>
+              <span style="color:var(--text-dim);font-size:11px;margin-left:8px;">${row.games} игр</span>
+            </div>`;
+        });
+        html += `</div>`;
+      }
+
+      html += `<div class="c4-label" style="text-align:left;">Последние партии</div>`;
+      if (histRes.rows.length === 0) {
+        html += `<div style="color:var(--text-dim);font-size:13px;">Пока пусто.</div>`;
+      } else {
+        histRes.rows.forEach((g) => {
+          const result = g.winner_name
+            ? `${escapeHtml(g.winner_name)} 🏆`
+            : "ничья";
+          html += `
+            <div style="text-align:left;font-size:12.5px;color:var(--text-dim);padding:6px 0;border-bottom:1px solid #221f1b;">
+              ${escapeHtml(g.player1_name)} <span style="color:var(--text);">${g.score1}:${g.score2}</span> ${escapeHtml(g.player2_name)}
+              &nbsp;—&nbsp;<span style="color:var(--p2);">${result}</span>
+            </div>`;
+        });
+      }
+      body.innerHTML = html;
+    } catch (e) {
+      document.getElementById("statsBody").textContent = "Не удалось загрузить статистику.";
+    }
+  }
+
+  function escapeHtml(str) {
+    const d = document.createElement("div");
+    d.textContent = str == null ? "" : String(str);
+    return d.innerHTML;
   }
 
   // ---------------- LOBBY ----------------
